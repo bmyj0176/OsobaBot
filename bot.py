@@ -3,6 +3,7 @@ import threading
 import time
 import random
 from discord.ext import commands, tasks
+from discord.errors import Forbidden
 import datafunctions as data
 import csv
 
@@ -13,10 +14,13 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix='@', intents=intents)
 
-whitelisted_users = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+whitelisted_users = range(1,12)
 tipCooldown = False
 hell = False    
 pingCount = 0
+active_channel = None
+ctxClass = None
+enableDM = False
 
 with open('targetUser.txt', 'r') as file:
     targetUser = file.read()
@@ -34,26 +38,33 @@ async def on_message(message):
     global pingCount
     global tipCooldown
     global whitelisted_users
+    global active_channel
     
     # Avoid the bot responding to itself
     if message.author == bot.user:
         return
+    
+    print(f"{message.author} said {message.content}")
 
     # Check if the bot should respond to all messages
     if hell:
         if pingCheck(message.content):
+            if "OVERRIDE" in message.content:
+                await retarget(message)
             if int(data.read_row('userid', str(extract_user_id(targetUser)))['id']) in whitelisted_users: # check if target in whitelist
                 if data.read_row('username', str(message.author))['userid'] == extract_user_id(targetUser): # if pinger is the target
                     await retarget(message)
                 else:
-                    await message.channel.send(f"You can't pass the ping {data.read_row('username', str(message.author))['nickname']}.")
+                    if message.channel.id == active_channel:
+                        await message.channel.send(f"You can't pass the ping {data.read_row('username', str(message.author))['nickname']}.")
             else: # if target is not in whitelist
                 await retarget(message)
         else:
             if not tipCooldown:
-                await message.channel.send(f'TIP: If you\'re being targeted, you can ping someone else to pass the pings to them')
-                tipCooldown = True
-                threading.Thread(target=tipcd).start()
+                if message.channel.id == active_channel:
+                    await message.channel.send(f'TIP: If you\'re being targeted, you can ping someone else to pass the pings to them')
+                    tipCooldown = True
+                    threading.Thread(target=tipcd).start()
 
     # Process commands if present
     await bot.process_commands(message)
@@ -61,8 +72,11 @@ async def on_message(message):
 async def retarget(message):
     global pingCount
     global targetUser
+    if "OVERRIDE" in message.content:
+        message.content = message.content.replace("OVERRIDE", "")
     await message.channel.send(f'New Target: {message.content}')
     targetUser = message.content
+    
     with open('targetUser.txt', 'w') as file:
         file.write(targetUser)
     pingCount = 0
@@ -79,8 +93,12 @@ async def retarget(message):
 
 @bot.command()
 async def begin(ctx):
+    global ctxClass
     global hell
+    global active_channel
     hell = True
+    ctxClass = ctx
+    active_channel = ctx.channel.id
     await ctx.send(f'Starting.')
 
 @bot.command()
@@ -88,38 +106,60 @@ async def stop(ctx):
     global hell
     hell = False
     await ctx.send(f'Stopped.')
+    
+@bot.command()
+async def toggleDM(ctx):
+    global enableDM
+    enableDM = not enableDM
+    await ctx.send(f'Toggled to {enableDM}')
 
 @bot.command()
 async def leaderboards(ctx):
     with open('userdata.csv', 'r') as file:
         reader = csv.DictReader(file)
         extracted_data = list(reader)  # Read all rows into a list
-    sorted_data = sorted(extracted_data, key=lambda x: int(x["totalpingcount"]), reverse=True)
+
+    guild_id = str(ctx.guild.id)  # Get the guild ID
+    guild_member_ids = [str(member.id) for member in ctx.guild.members]
+
+    # Filter users based on the user_id and handle missing 'user_id' key
+    filtered_data = [data for data in extracted_data if data.get('userid') and str(data['userid']) in guild_member_ids]
+
+    sorted_data = sorted(filtered_data, key=lambda x: int(x["totalpingcount"]), reverse=True)
+
     string = '# Total Ping Count Leaderboards:\n'
     for index in range(len(sorted_data)):
-        if index == 0: string += f"**"
+        if index == 0:
+            string += f"**"
         string += f"{index+1}) {sorted_data[index]['nickname']} — {sorted_data[index]['totalpingcount']}\n"
-        if index == 0: string += f"**"
+        if index == 0:
+            string += f"**"
+
     await ctx.send(f"{string}")
 
 @tasks.loop(seconds=2)  # Run this task every second
 async def hell_loop():
+    global enableDM
     global hell
     global targetUser
     global pingCount
+    global channel
+    global ctxClass
     if hell:
         pingCount = pingCount + 1
         row = data.read_row('userid', str(extract_user_id(targetUser)))
         row['totalpingcount'] = str(int(row['totalpingcount']) + 1)
         data.save_row(row)
-        channel = bot.get_channel(1280299406301728871)
+        channel = bot.get_channel(active_channel)
         await channel.send(f'{targetUser} x{pingCount} ({row['totalpingcount']})')
-        if random.randint(1, 1000) == 1: await channel.send(f'\n**UNCOMMON!** A card from your wishlist is dropping! (1/1000)\n')
-        if random.randint(1, 2500) == 1: await channel.send(f'\n**RARE! Bacon takes a shower! (1/2500)**\n')
-        if random.randint(1, 5000) == 1: await channel.send(f'\n***VERY RARE! An AXS update released! (1/5000)***\n')
-        if random.randint(1, 10000) == 1: await channel.send(f'\n# HOLY SHIT! Beemas released early this year! (1/10000)\n')
-        if random.randint(1, 15000) == 1: await channel.send(f'\n# 💥 HOLY FUCKING SHIT! 💥 Hy sent a message in main gc! (1/15000)\n')
-        if random.randint(1, 25000) == 1: await channel.send(f'\n# 💥💥💥 HOLY FUCKING NIGGGGGGGG!!!!!!!!!! 💥💥💥 Silksong news dropped! (1/25000) 💥💥💥\n')
+        userID = int(extract_user_id(targetUser))
+        if ctxClass:
+            memberDM = ctxClass.guild.get_member(userID)
+        if memberDM and enableDM:
+            try:
+                await memberDM.send(f'{targetUser} x{pingCount} ({row['totalpingcount']})')
+            except Forbidden:
+                print(f"Cannot send message to {targetUser}.")
 
 def tipcd():
     global tipCooldown
@@ -167,5 +207,7 @@ async def get_username_from_id(user_id):
         print(f"Unexpected exception: {e}")
         return "Error"
 
+with open('api_key.txt', 'r') as file:
+    api_key = str(file.read())
 # Run the bot with your token
-bot.run('MTI4MDUxMjkwMzc0NDcyMDkyNg.GirpZJ.1PcIQy4rG1xUonRls0CjY-99L1IjSGfop3gx-Q')
+bot.run(api_key)
